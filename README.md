@@ -1,934 +1,434 @@
-# Assessment Codebase Guide
+# Creator Card Service
 
-This guide will help you understand the codebase architecture and set up your services, endpoints, and middleware correctly. This is NOT a solution to the assessment - it's a reference guide to help you implement your own solution following the codebase conventions.
-
-> 📖 **For comprehensive architecture documentation, see [documentation.md](./documentation.md)**
+A Node.js REST microservice for managing creator cards. Built on an existing
+project scaffold using Express and MongoDB with soft deletion, slug-based
+retrieval, and per-card access controls.
 
 ---
 
 ## Table of Contents
 
-1. [Project Architecture Overview](#project-architecture-overview)
-2. [Setting Up a Service](#setting-up-a-service)
-3. [Creating an Endpoint](#creating-an-endpoint)
-4. [Using Middleware (Optional)](#using-middleware-optional)
-5. [Error Handling](#error-handling)
-6. [Testing Your Implementation](#testing-your-implementation)
-7. [Common Pitfalls](#common-pitfalls)
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Endpoints](#endpoints)
+- [Request and Response Shapes](#request-and-response-shapes)
+- [Business Rules](#business-rules)
+- [Error Codes](#error-codes)
+- [Data Model](#data-model)
+- [Slug Generation](#slug-generation)
+- [Soft Deletion](#soft-deletion)
+- [Project Structure](#project-structure)
+- [Setup](#setup)
+- [Running Tests](#running-tests)
+- [Deployment](#deployment)
 
 ---
 
-## Project Architecture Overview
+## Overview
 
-The codebase follows a layered architecture:
-
-```
-Request → Endpoint → Middleware (optional) → Service → Repository → Database
-```
-
-**Key Principles:**
-- **Endpoints** handle HTTP routing and orchestrate service calls
-- **Services** contain business logic and validation
-- **Repositories** handle database operations (not needed for assessment)
-- **Middleware** handles cross-cutting concerns (auth, logging, etc.)
-
-**Path Aliases:**
-- `@app-core/*` - Core utilities (logger, validator, errors, etc.)
-- `@app/services/*` - Business logic services
-- `@app/messages/*` - Error message definitions
-- `@app/middlewares/*` - Middleware functions
-
-> 💡 **For detailed information about core modules, repositories, and advanced patterns, see [documentation.md](./documentation.md)**
+The Creator Card Service exposes three public endpoints for creating, retrieving,
+and deleting creator cards. Cards can be public or private. Private cards require
+an access code on retrieval. Draft cards are not publicly retrievable. All
+deletions are soft, meaning the record is retained in the database and the slug
+is freed for reuse.
 
 ---
 
-## Setting Up a Service
+## Architecture
 
-Services are the "workhorse" of the application. They contain all business logic and validation.
+The service follows the scaffold conventions established in the project template:
 
-### Service Structure
+- **Endpoints** are thin Express handlers that pass raw request data to services
+- **Services** own all validation and business logic
+- **Repository** abstracts all database access through a factory pattern
+- **Models** define Mongoose schemas using the template schema helpers
+- **Messages** centralise all user-facing error strings
+- **Core** provides shared utilities: validator (VSL), error handling, repository
+  factory, Mongoose helpers, and the Express server abstraction
 
-**Location:** `services/[feature-group]/[service-name].js`
-
-**Example:** `services/payment-processor/parse-instruction.js`
-
-### Service Template
-
-```javascript
-const validator = require('@app-core/validator');
-const { throwAppError, ERROR_CODE } = require('@app-core/errors');
-const { appLogger } = require('@app-core/logger');
-const PaymentMessages = require('@app/messages/payment'); // Your message file
-
-// Step 1: Define your validation spec
-const spec = `root {
-  accounts[] {
-    id string
-    balance number
-    currency string
-  }
-  instruction string
-}`;
-
-// Step 2: Parse the spec once (outside the function)
-const parsedSpec = validator.parse(spec);
-
-// Step 3: Define your service function
-async function parseInstruction(serviceData, options = {}) {
-  let response;
-
-  // Step 4: Validate input data
-  const data = validator.validate(serviceData, parsedSpec);
-
-  try {
-    // Step 5: Implement your business logic
-    const instruction = data.instruction.trim();
-    const accounts = data.accounts;
-
-    // Your parsing logic here...
-    // Example: Extract keywords, validate, process
-
-    // Build your response
-    response = {
-      type: 'DEBIT',
-      amount: 100,
-      currency: 'USD',
-      debit_account: 'a',
-      credit_account: 'b',
-      execute_by: null,
-      status: 'successful',
-      status_reason: 'Transaction executed successfully',
-      status_code: 'AP00',
-      accounts: processedAccounts,
-    };
-  } catch (error) {
-    appLogger.errorX(error, 'parse-instruction-error');
-    throw error;
-  }
-
-  // Step 6: Single exit point - return response
-  return response;
-}
-
-// Step 7: Export the function
-module.exports = parseInstruction;
-```
-
-### Validator Spec Syntax (VSL)
-
-The validator uses a custom DSL (Domain Specific Language) called VSL.
-
-**Basic Syntax:**
-```javascript
-const spec = `root { // Description (optional)
-  fieldName type
-  optionalField? type
-  arrayField[] type
-  nestedObject {
-    innerField type
-  }
-}`;
-```
-
-**Important:** Always include a **space** between `root` and `{`
-
-**Available Types:**
-- `string` - Text values
-- `number` - Numeric values (integers or decimals)
-- `boolean` - true/false values
-- `object` - Nested objects
-- `any` - Any type
-
-**Field Modifiers:**
-- `field type` - Required field
-- `field? type` - Optional field
-- `field[] type` - Required array
-- `field[]? type` - Optional array
-
-**Constraints:**
-
-Constraints are added with angle brackets: `<constraint1|constraint2>`
-
-```javascript
-// String constraints
-string<trim>                           // Remove leading/trailing spaces
-string<lowercase>                      // Convert to lowercase
-string<uppercase>                      // Convert to uppercase
-string<minLength:8>                    // Minimum length
-string<maxLength:100>                  // Maximum length
-string<length:26>                      // Exact length
-string<lengthBetween:5,50>            // Length range
-string<startsWith:prefix>             // Must start with
-string<endsWith:.pdf>                 // Must end with
-string<isEmail>                       // Email validation
-
-// Numeric constraints
-number<min:0>                         // Minimum value
-number<max:1000>                      // Maximum value
-number<between:1,100>                 // Value range
-
-// Enums (preferred shorthand)
-status string(pending|approved|rejected)
-
-// Multiple constraints (order matters: transforms → length → format → enums)
-email string<trim|lowercase|isEmail>
-code string<uppercase|length:3>
-```
-
-**Example Specs:**
-
-```javascript
-// Simple flat structure
-const spec1 = `root {
-  name string<trim|minLength:1>
-  email string<trim|lowercase|isEmail>
-  age? number<min:18|max:120>
-  status string(active|inactive)
-}`;
-
-// Nested structure
-const spec2 = `root {
-  user {
-    id string<length:26>
-    profile {
-      name string<trim>
-      email string<trim|lowercase|isEmail>
-    }
-  }
-  settings {
-    theme string(light|dark)
-    notifications boolean
-  }
-}`;
-
-// Arrays
-const spec3 = `root {
-  accounts[] {
-    id string
-    balance number<min:0>
-    currency string<uppercase|length:3>
-  }
-  tags[]? string<trim|minLength:1>
-}`;
-```
-
-### Service Constraints (CRITICAL)
-
-**1. Two Parameters Only:**
-```javascript
-async function myService(serviceData, options = {}) {
-  // serviceData: all input data as a single object
-  // options: optional configuration (defaults to {})
-}
-```
-
-**2. Input Validation First:**
-```javascript
-const data = validator.validate(serviceData, parsedSpec);
-// Validation must be the FIRST step
-```
-
-**3. Single Exit Point:**
-```javascript
-async function myService(serviceData, options = {}) {
-  let response; // Declare at top
-  
-  // ... logic ...
-  
-  return response; // Only ONE return statement
-}
-```
-
-**4. Error Handling:**
-```javascript
-// Always use throwAppError with message files
-if (invalidCondition) {
-  throwAppError(MessageFile.ERROR_MESSAGE, ERROR_CODE.INVLDDATA);
-}
-```
-
-### Creating Message Files
-
-**Location:** `messages/[resource].js`
-
-**Example:** `messages/payment.js`
-
-```javascript
-const PaymentMessages = {
-  INVALID_AMOUNT: 'Amount must be a positive integer',
-  CURRENCY_MISMATCH: 'Account currency mismatch',
-  UNSUPPORTED_CURRENCY: 'Only NGN, USD, GBP, and GHS are supported',
-  INSUFFICIENT_FUNDS: 'Insufficient funds in debit account',
-  SAME_ACCOUNT_ERROR: 'Debit and credit accounts cannot be the same',
-  ACCOUNT_NOT_FOUND: 'Account not found',
-  INVALID_ACCOUNT_ID: 'Invalid account ID format',
-  INVALID_DATE_FORMAT: 'Date must be in YYYY-MM-DD format',
-  MISSING_KEYWORD: 'Missing required keyword',
-  INVALID_KEYWORD_ORDER: 'Invalid keyword order',
-  MALFORMED_INSTRUCTION: 'Malformed instruction',
-  TRANSACTION_SUCCESSFUL: 'Transaction executed successfully',
-  TRANSACTION_PENDING: 'Transaction scheduled for future execution',
-};
-
-module.exports = PaymentMessages;
-```
-
-**Register your message file** in `messages/index.js`:
-```javascript
-module.exports = {
-  // ... existing messages
-  PaymentMessages: require('./payment'),
-};
-```
+No authentication, API keys, or versioned URL prefixes are used. All routes are
+mounted at the root.
 
 ---
 
-## Creating an Endpoint
+## Endpoints
 
-Endpoints define API routes and orchestrate service calls.
-
-### Endpoint Structure
-
-**Location:** `endpoints/[feature-group]/[endpoint-name].js`
-
-**Example:** `endpoints/payment-instructions/process.js`
-
-### Endpoint Template
-
-```javascript
-const { createHandler } = require('@app-core/server');
-const parseInstruction = require('@app/services/payment-processor/parse-instruction');
-
-module.exports = createHandler({
-  // Step 1: Define the route
-  path: '/payment-instructions',
-  method: 'post', // 'get', 'post', 'put', 'patch', 'delete'
-
-  // Step 2: Add middlewares (optional)
-  middlewares: [], // Empty for no middleware
-
-  // Step 3: Define props (optional)
-  props: {
-    // Custom properties accessible in middleware/handler
-    // Example: ACL: { requiresAuth: false }
-  },
-
-  // Step 4: Define the handler
-  async handler(rc, helpers) {
-    // rc = request context
-    // rc.body = POST/PUT/PATCH payload
-    // rc.query = GET query parameters
-    // rc.params = URL path parameters
-    // rc.headers = HTTP headers
-    // rc.meta = Data added by middleware
-
-    // Step 5: Prepare service payload
-    const payload = {
-      ...rc.body, // For POST/PUT/PATCH
-      // ...rc.query, // For GET
-      // ...rc.params, // For path params like /resource/:id
-    };
-
-    // Step 6: Call your service
-    const response = await parseInstruction(payload);
-
-    // Step 7: Return response
-    return {
-      status: helpers.http_statuses.HTTP_200_OK,
-      message: 'Instruction processed successfully', // Optional
-      data: response,
-    };
-  },
-});
-```
-
-### HTTP Status Codes
-
-Available via `helpers.http_statuses`:
-
-```javascript
-// Success codes
-HTTP_200_OK                    // General success
-HTTP_201_CREATED              // Resource created
-HTTP_204_NO_CONTENT           // Success with no content
-
-// Client error codes
-HTTP_400_BAD_REQUEST          // Validation errors
-HTTP_401_UNAUTHORIZED         // Authentication required
-HTTP_403_FORBIDDEN            // Permission denied
-HTTP_404_NOT_FOUND           // Resource not found
-HTTP_409_CONFLICT            // Duplicate resource
-
-// Server error codes
-HTTP_500_INTERNAL_SERVER_ERROR // General server error
-HTTP_503_SERVICE_UNAVAILABLE   // Service down
-```
-
-**Usage Example:**
-```javascript
-// Success
-return {
-  status: helpers.http_statuses.HTTP_200_OK,
-  data: result,
-};
-
-// Validation error (caught by error handler)
-// Just throw the error, the framework handles the status code
-throwAppError(Messages.INVALID_INPUT, ERROR_CODE.VALIDATIONERR);
-```
-
-### Registering Your Endpoint
-
-**Step 1:** Create your endpoint folder structure
-```
-endpoints/
-  payment-instructions/
-    process.js        // Your endpoint file
-```
-
-**Step 2:** Add to `app.js`
-```javascript
-const ENDPOINT_CONFIGS = [
-  // ... existing configs
-  { path: './endpoints/payment-instructions/' }, // Add your folder
-];
-```
-
-The framework will automatically load all `.js` files in the folder.
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/creator-cards` | Create a new creator card |
+| GET | `/creator-cards/:slug` | Retrieve a card by slug |
+| DELETE | `/creator-cards/:slug` | Soft-delete a card by slug |
 
 ---
 
-## Using Middleware (Optional)
+## Request and Response Shapes
 
-Middleware runs before your endpoint handler. Use it for cross-cutting concerns like authentication, logging, or validation.
+### POST /creator-cards
 
-### When to Use Middleware
+**Request body**
 
-**Use middleware for:**
-- Authentication/authorization
-- Request logging
-- Rate limiting
-- Payload signature verification
-- Input sanitization
-
-**Don't use middleware for:**
-- Business logic (belongs in services)
-- Data transformations (belongs in services)
-- Database operations (belongs in repositories)
-
-### Middleware Structure
-
-**Location:** `middlewares/[middleware-name].js`
-
-**Example:** `middlewares/log-request.js`
-
-```javascript
-const { createHandler } = require('@app-core/server');
-const { appLogger } = require('@app-core/logger');
-
-module.exports = createHandler({
-  // Step 1: Define path pattern
-  path: '*', // '*' = all routes, or specific pattern like '/api/*'
-
-  // Step 2: Define handler
-  async handler(rc, helpers) {
-    // rc = request context
-    // rc.props = endpoint props (from endpoint definition)
-
-    // Step 3: Perform middleware logic
-    appLogger.info(
-      {
-        method: rc.method,
-        path: rc.path,
-        body: rc.body,
-      },
-      'request-received'
-    );
-
-    // Step 4: Augment request context (optional)
-    // Data added here becomes available in endpoint handler as rc.meta
-    return {
-      augments: {
-        meta: {
-          requestTime: Date.now(),
-          // Add any data you want available in endpoint handler
-        },
-      },
-    };
+```json
+{
+  "title": "George Cooks",
+  "description": "Weekly cooking podcast and recipe content.",
+  "slug": "george-cooks",
+  "creator_reference": "crt_8f2k1m9x4p7w3q5z",
+  "links": [
+    { "title": "YouTube", "url": "https://youtube.com/@georgecooks" }
+  ],
+  "service_rates": {
+    "currency": "NGN",
+    "rates": [
+      { "name": "IG Story Post", "description": "One story mention", "amount": 5000000 }
+    ]
   },
-});
-```
-
-### Using Middleware in Endpoints
-
-```javascript
-const { createHandler } = require('@app-core/server');
-const logRequest = require('@app/middlewares/log-request');
-
-module.exports = createHandler({
-  path: '/payment-instructions',
-  method: 'post',
-  
-  // Add middleware here
-  middlewares: [logRequest],
-  
-  async handler(rc, helpers) {
-    // Access data from middleware via rc.meta
-    console.log('Request time:', rc.meta.requestTime);
-    
-    // Your handler logic...
-  },
-});
-```
-
-### Middleware Example: Simple Validator
-
-```javascript
-const { createHandler } = require('@app-core/server');
-const { throwAppError, ERROR_CODE } = require('@app-core/errors');
-
-module.exports = createHandler({
-  path: '*',
-  async handler(rc) {
-    // Check if endpoint requires validation
-    if (rc.props?.requiresValidation) {
-      const contentType = rc.headers['content-type'];
-      
-      if (!contentType || !contentType.includes('application/json')) {
-        throwAppError(
-          'Content-Type must be application/json',
-          ERROR_CODE.INVLDREQ
-        );
-      }
-    }
-
-    // Pass through without augments
-    return {};
-  },
-});
-```
-
-**Register middleware** in `middlewares/index.js`:
-```javascript
-module.exports = {
-  // ... existing middleware
-  logRequest: require('./log-request'),
-};
-```
-
----
-
-## Error Handling
-
-The codebase has a centralized error handling system.
-
-### Available Error Codes
-
-From `@app-core/errors`:
-
-```javascript
-const { ERROR_CODE } = require('@app-core/errors');
-
-// Authentication & Authorization
-ERROR_CODE.AUTHERR           // Authentication error
-ERROR_CODE.NOAUTHERR         // No authentication provided
-ERROR_CODE.INVLDAUTHTOKEN    // Invalid auth token
-ERROR_CODE.INACTIVEACCT      // Inactive account
-ERROR_CODE.EXPIREDTOKEN      // Expired token
-ERROR_CODE.PERMERR           // Permission error
-
-// Request Errors
-ERROR_CODE.INVLDREQ          // Invalid request
-ERROR_CODE.INVLDDATA         // Invalid data
-ERROR_CODE.VALIDATIONERR     // Validation error
-ERROR_CODE.NOTFOUND          // Not found
-
-// Business Errors
-ERROR_CODE.DUPLRCRD          // Duplicate record
-ERROR_CODE.LIMITERR          // Rate limit error
-ERROR_CODE.FEEERR            // Fee error
-
-// System Errors
-ERROR_CODE.APPERR            // Application error
-ERROR_CODE.HTTPREQERR        // HTTP request error
-```
-
-### Throwing Errors
-
-**Always use `throwAppError`:**
-
-```javascript
-const { throwAppError, ERROR_CODE } = require('@app-core/errors');
-const PaymentMessages = require('@app/messages/payment');
-
-// Throw an error
-if (!account) {
-  throwAppError(PaymentMessages.ACCOUNT_NOT_FOUND, ERROR_CODE.NOTFOUND);
+  "status": "published",
+  "access_type": "public"
 }
-
-// The framework automatically converts this to appropriate HTTP response
 ```
 
-### Error Response Format
+Required fields: `title`, `creator_reference`, `status`
 
-The framework automatically formats errors:
+Optional fields: `description`, `slug`, `links`, `service_rates`, `access_type`, `access_code`
+
+**Success response — HTTP 200**
+
+```json
+{
+  "status": "success",
+  "message": "Creator Card Created Successfully.",
+  "data": {
+    "id": "01KVKVGZN0MK2XG41RDW2PYDYT",
+    "title": "George Cooks",
+    "description": "Weekly cooking podcast and recipe content.",
+    "slug": "george-cooks",
+    "creator_reference": "crt_8f2k1m9x4p7w3q5z",
+    "links": [{ "title": "YouTube", "url": "https://youtube.com/@georgecooks" }],
+    "service_rates": { "currency": "NGN", "rates": [...] },
+    "status": "published",
+    "access_type": "public",
+    "access_code": null,
+    "created": 1782001810477,
+    "updated": 1782001810477,
+    "deleted": null
+  }
+}
+```
+
+Notes:
+- `access_code` is always present in create responses. It is `null` for public cards
+  and the actual code for private cards.
+- `deleted` is always `null` on a freshly created card.
+- HTTP status is `200`, not `201`.
+
+---
+
+### GET /creator-cards/:slug
+
+**Query parameter (optional):** `access_code`
+
+Example: `GET /creator-cards/vip-rate-card?access_code=A1B2C3`
+
+**Success response — HTTP 200**
+
+```json
+{
+  "status": "success",
+  "message": "Creator Card Retrieved Successfully.",
+  "data": {
+    "id": "01KVKVH04KS67NW3D4MW75QZMW",
+    "title": "VIP Rate Card",
+    "slug": "vip-rate-card",
+    "creator_reference": "crt_x9y8z7w6v5u4t3s2",
+    "status": "published",
+    "access_type": "private",
+    "created": 1782001810477,
+    "updated": 1782001810477,
+    "deleted": null
+  }
+}
+```
+
+Notes:
+- `access_code` is **never** present in retrieval responses, not even as `null`.
+- `_id` is never exposed. The identifier is always serialised as `id`.
+
+---
+
+### DELETE /creator-cards/:slug
+
+**Request body**
+
+```json
+{
+  "creator_reference": "crt_8f2k1m9x4p7w3q5z"
+}
+```
+
+`creator_reference` is required and must be exactly 20 characters. The record is
+only deleted if the slug and creator_reference both match an active card.
+
+**Success response — HTTP 200**
+
+```json
+{
+  "status": "success",
+  "message": "Creator Card Deleted Successfully.",
+  "data": {
+    "id": "01KVKVGZN0MK2XG41RDW2PYDYT",
+    "slug": "ada-designs-things",
+    "access_code": null,
+    "deleted": 1782001832930,
+    ...
+  }
+}
+```
+
+Notes:
+- Response format matches the create response, including `access_code`.
+- `deleted` is a Unix epoch millisecond timestamp.
+- The slug is freed for reuse after deletion.
+
+---
+
+## Business Rules
+
+### Access control on retrieval
+
+Access rules are enforced in this exact order:
+
+1. No active card found for the slug — `NF01` (HTTP 404)
+2. Card is a draft — `NF02` (HTTP 404)
+3. Card is private and no `access_code` query param was provided — `AC03` (HTTP 403)
+4. Card is private and the provided `access_code` is wrong — `AC04` (HTTP 403)
+5. All checks pass — return the card
+
+### Access code rules on creation
+
+- A private card (`access_type: "private"`) must include `access_code` — `AC01`
+- A public card must not include `access_code` — `AC05`
+- `access_code` must be exactly 6 alphanumeric characters
+
+### Slug uniqueness
+
+- If a client provides a slug that is already taken by an active card, the request
+  fails with `SL02`.
+- If no slug is provided, one is generated from the title. If the generated slug is
+  already taken, a random 6-character suffix is appended and retried automatically.
+- Duplicate key errors from MongoDB on insert are caught and translated to `SL02`
+  for client-provided slugs, or retried with a suffix for auto-generated slugs.
+
+---
+
+## Error Codes
+
+All error responses follow this shape:
 
 ```json
 {
   "status": "error",
-  "message": "Account not found",
-  "code": "NOTFOUND"
+  "message": "Human-readable description.",
+  "code": "SL02"
 }
 ```
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `SL02` | 400 | Duplicate client-provided slug |
+| `AC01` | 400 | Private card missing access_code |
+| `AC05` | 400 | Public card with access_code set |
+| `NF01` | 404 | No active card found for this slug |
+| `NF02` | 404 | Card exists but is a draft |
+| `AC03` | 403 | Private card, no access_code provided |
+| `AC04` | 403 | Private card, wrong access_code |
+
+Validation failures (field type, length, enum, format) return HTTP 400 with the
+VSL validation error shape. No custom code is used for these.
 
 ---
 
-## Testing Your Implementation
+## Data Model
 
-### Local Testing
+Collection: `creatorCards`
 
-**1. Start your server:**
-```bash
-npm run dev
-```
+| Field | Type | Notes |
+|-------|------|-------|
+| `_id` | ULID string | Internal identifier, never exposed in responses |
+| `title` | string | 3 to 100 characters, required |
+| `description` | string | Max 500 characters, optional |
+| `slug` | string | 5 to 50 characters, letters/numbers/hyphens/underscores, unique among active records |
+| `creator_reference` | string | Exactly 20 characters, required |
+| `links` | array | Each item has `title` (1-100 chars) and `url` (must start with http:// or https://) |
+| `service_rates` | object | Has `currency` (NGN, USD, GBP, GHS) and `rates` array |
+| `rates[].name` | string | 3 to 100 characters |
+| `rates[].description` | string | Max 250 characters |
+| `rates[].amount` | integer | Positive integer, minimum 1 |
+| `status` | string | `draft` or `published` |
+| `access_type` | string | `public` or `private`, defaults to `public` |
+| `access_code` | string | Exactly 6 alphanumeric characters, private cards only |
+| `created` | number | Unix epoch milliseconds |
+| `updated` | number | Unix epoch milliseconds |
+| `deleted` | number | `0` internally for active records, serialised as `null` in responses |
 
-> 💡 **For complete setup instructions, see the [Getting Started](./documentation.md#getting-started) section in documentation.md**
-
-**2. Test with curl:**
-```bash
-curl -X POST http://localhost:3000/payment-instructions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "accounts": [
-      {"id": "a", "balance": 230, "currency": "USD"},
-      {"id": "b", "balance": 300, "currency": "USD"}
-    ],
-    "instruction": "DEBIT 30 USD FROM ACCOUNT a FOR CREDIT TO ACCOUNT b"
-  }'
-```
-
-**3. Test with Postman or Thunder Client (VS Code extension)**
-
-### Logging
-
-Use the built-in logger (never use `console.log`):
-
-```javascript
-const { appLogger } = require('@app-core/logger');
-
-// Info logging
-appLogger.info({ data: 'some data' }, 'log-key');
-
-// Warning
-appLogger.warn({ issue: 'something' }, 'warning-key');
-
-// Error
-appLogger.error({ error: err }, 'error-key');
-
-// Critical error (special formatting)
-appLogger.errorX({ error: err }, 'critical-error-key');
-```
-
-### Debugging Tips
-
-**1. Log your parsing steps:**
-```javascript
-appLogger.info({ instruction: instruction }, 'parsing-start');
-appLogger.info({ parsed: parsedData }, 'parsing-complete');
-```
-
-**2. Validate incrementally:**
-```javascript
-// Check one thing at a time
-if (!isValidAmount) {
-  appLogger.warn({ amount }, 'invalid-amount');
-  throwAppError(Messages.INVALID_AMOUNT, ERROR_CODE.INVLDDATA);
-}
-```
-
-**3. Test edge cases:**
-- Empty strings
-- Extra whitespace
-- Case variations
-- Missing keywords
-- Invalid formats
+Indexes: `slug` is unique among active records. Soft-deleted records have their
+slug rewritten to free the value for reuse.
 
 ---
 
-## Common Pitfalls
+## Slug Generation
 
-### 1. Validator Spec Formatting
+When no slug is provided:
 
-❌ **Wrong:**
-```javascript
-const spec = `root{ // No space before brace
-  name string
-}`;
-```
+1. Lowercase the title
+2. Replace whitespace with hyphens
+3. Remove all characters that are not letters, numbers, hyphens, or underscores
+4. If the result is shorter than 5 characters, append a hyphen and a random
+   6-character alphanumeric suffix
+5. If the result is already taken by an active card, append a suffix and retry
 
-✅ **Correct:**
-```javascript
-const spec = `root { // Space before brace
-  name string
-}`;
-```
+When a slug is provided by the client:
 
-### 2. Service Function Signature
-
-❌ **Wrong:**
-```javascript
-async function myService(param1, param2, param3) {
-  // Multiple individual parameters
-}
-```
-
-✅ **Correct:**
-```javascript
-async function myService(serviceData, options = {}) {
-  // Single object parameter + optional options
-}
-```
-
-### 3. Multiple Return Statements
-
-❌ **Wrong:**
-```javascript
-async function myService(serviceData, options = {}) {
-  if (condition) {
-    return result1;
-  }
-  return result2; // Multiple returns
-}
-```
-
-✅ **Correct:**
-```javascript
-async function myService(serviceData, options = {}) {
-  let response;
-  
-  if (condition) {
-    response = result1;
-  } else {
-    response = result2;
-  }
-  
-  return response; // Single return
-}
-```
-
-### 4. Error Handling
-
-❌ **Wrong:**
-```javascript
-throw new Error('Account not found'); // Plain Error
-```
-
-✅ **Correct:**
-```javascript
-const { throwAppError, ERROR_CODE } = require('@app-core/errors');
-const Messages = require('@app/messages/payment');
-
-throwAppError(Messages.ACCOUNT_NOT_FOUND, ERROR_CODE.NOTFOUND);
-```
-
-### 5. Logging
-
-❌ **Wrong:**
-```javascript
-console.log('Processing payment'); // Don't use console.log
-```
-
-✅ **Correct:**
-```javascript
-const { appLogger } = require('@app-core/logger');
-appLogger.info({ action: 'processing' }, 'payment-processing');
-```
-
-### 6. Validation Before Logic
-
-❌ **Wrong:**
-```javascript
-async function myService(serviceData, options = {}) {
-  // Business logic first
-  const result = processData(serviceData);
-  
-  // Validation later
-  const data = validator.validate(serviceData, parsedSpec);
-}
-```
-
-✅ **Correct:**
-```javascript
-async function myService(serviceData, options = {}) {
-  // Validation FIRST
-  const data = validator.validate(serviceData, parsedSpec);
-  
-  // Then business logic
-  const result = processData(data);
-}
-```
-
-### 7. Path Aliases
-
-❌ **Wrong:**
-```javascript
-const validator = require('../../core/validator');
-const logger = require('../../../core/logger');
-```
-
-✅ **Correct:**
-```javascript
-const validator = require('@app-core/validator');
-const { appLogger } = require('@app-core/logger');
-```
+- Must match `[A-Za-z0-9_-]` only
+- Must be between 5 and 50 characters
+- If already taken, fail with `SL02`. The slug is never modified.
 
 ---
 
-## Quick Reference
+## Soft Deletion
 
-### File Structure for Assessment
+Records are never hard-deleted. On delete:
+
+- The `deleted` field is set to the current Unix timestamp in milliseconds
+- The `slug` field is rewritten to `&del:<timestamp>-<original-slug>` so the
+  original slug is freed and can be reused
+- The `updated` field is updated to match the deletion timestamp
+- All repository `findOne` calls automatically exclude records where `deleted != 0`
+
+---
+
+## Project Structure
 
 ```
-services/
-  payment-processor/
-    parse-instruction.js       # Your parsing service
+app.js                          server setup and route registration
+bootstrap.js                    entry point, loads .env
+Procfile                        Render/Heroku start command
 
-endpoints/
-  payment-instructions/
-    process.js                 # Your API endpoint
+models/
+  creator-card.js               Mongoose schema with ULID _id and paranoid soft delete
+
+repository/
+  creator-card/index.js         repository factory wired to CreatorCard model
 
 messages/
-  payment.js                   # Your error messages
-```
+  creator-card.js               all user-facing error strings
 
-### Minimal Service Template
+services/creator-cards/
+  create-card.js                create service with VSL validation and business rules
+  get-card.js                   retrieval service with ordered access control
+  delete-card.js                soft-delete service
+  serialize-creator-card.js     serialises DB documents to API response shape
+  generate-slug.js              slug generation from title with suffix logic
+  throw-creator-card-error.js   maps business error codes to messages
+  validators.js                 custom validators for slug, access code, URLs, amounts
 
-```javascript
-const validator = require('@app-core/validator');
-const { throwAppError, ERROR_CODE } = require('@app-core/errors');
-const Messages = require('@app/messages/payment');
+endpoints/creator-cards/
+  create.js                     POST /creator-cards
+  get.js                        GET /creator-cards/:slug
+  delete.js                     DELETE /creator-cards/:slug
 
-const spec = `root {
-  // Your spec here
-}`;
+core/
+  errors/                       throwAppError, error code constants, HTTP mappings
+  express/                      Express server abstraction, response wrappers
+  mongoose/                     DatabaseModel helper, ULID support, paranoid soft delete
+  repository-factory/           generic CRUD factory used by all repositories
+  validator-vsl/                VSL field validation engine
 
-const parsedSpec = validator.parse(spec);
+test/
+  creator-card.test.js          22 Mocha/Chai tests covering all assessment cases
 
-async function myService(serviceData, options = {}) {
-  let response;
-  const data = validator.validate(serviceData, parsedSpec);
-  
-  // Your logic here
-  
-  return response;
-}
-
-module.exports = myService;
-```
-
-### Minimal Endpoint Template
-
-```javascript
-const { createHandler } = require('@app-core/server');
-const myService = require('@app/services/my-group/my-service');
-
-module.exports = createHandler({
-  path: '/my-path',
-  method: 'post',
-  middlewares: [],
-  async handler(rc, helpers) {
-    const payload = rc.body;
-    const response = await myService(payload);
-    
-    return {
-      status: helpers.http_statuses.HTTP_200_OK,
-      data: response,
-    };
-  },
-});
+scripts/
+  seed-cards.js                 seeds 3 sample cards into the database
 ```
 
 ---
 
-## Additional Resources
+## Setup
 
-### Documentation
-
-- **[documentation.md](./documentation.md)** - Complete architecture guide covering:
-  - All core modules and their usage
-  - Comprehensive validator syntax reference
-  - Repository patterns and methods
-  - Transaction handling
-  - Model definitions and constraints
-  - Complete endpoint examples
-  - Best practices and code quality rules
-
-### Core Utilities
-
-```javascript
-// Logger
-const { appLogger } = require('@app-core/logger');
-appLogger.info(data, 'log-key');
-appLogger.error(data, 'error-key');
-
-// Errors
-const { throwAppError, ERROR_CODE } = require('@app-core/errors');
-throwAppError(message, ERROR_CODE.INVLDDATA);
-
-// Validator
-const validator = require('@app-core/validator');
-const spec = validator.parse(specString);
-const data = validator.validate(inputData, spec);
-
-// Randomness (if needed)
-const { ulid, uuid, randomNumbers } = require('@app-core/randomness');
-const id = ulid(); // Generate unique ID
-
-// Security (if needed)
-const { hash, redact } = require('@app-core/security');
-const hashed = await hash.create('password', 'bcrypt');
+```bash
+cp .env.example .env
 ```
 
-### String Manipulation (No Regex Allowed)
+Edit `.env` and set at minimum:
 
-For the assessment, you can only use basic string methods:
+```
+PORT=8811
+MONGODB_URI=<your MongoDB connection string>
+PINO_LOG_LEVEL=error
+NO_SINGLE_ERRORS=1
+TOP_LEVEL_ERROR_MESSAGE=Validation failed.
+```
 
-```javascript
-// Allowed
-.split(' ')           // Split by string
-.indexOf('keyword')   // Find position
-.substring(start, end) // Extract substring
-.slice(start, end)    // Extract substring
-.trim()               // Remove whitespace
-.toLowerCase()        // Convert to lowercase
-.toUpperCase()        // Convert to uppercase
-.replace('old', 'new') // Replace string with string
-.startsWith('prefix')
-.endsWith('suffix')
-.includes('substring')
+Install dependencies:
 
-// NOT allowed (uses regex)
-.match(/pattern/)
-.split(/pattern/)
-.replace(/pattern/, 'replacement')
-.test()
+```bash
+npm install
+```
+
+Start the server:
+
+```bash
+node bootstrap.js
+```
+
+You should see:
+
+```
+server started on port 8811
+mongodb connected
 ```
 
 ---
 
-## Final Tips
+## Running Tests
 
-1. **Read the [documentation.md](./documentation.md)** - Complete architecture documentation and conventions
-2. **Follow the single responsibility principle** - One service = one purpose
-3. **Validate early** - Catch errors as soon as possible
-4. **Log important steps** - Makes debugging easier
-5. **Test incrementally** - Don't write everything at once
-6. **Use the correct error codes** - Map validation failures to appropriate codes
-7. **Keep services pure** - No side effects, predictable outputs
-8. **Use path aliases** - Makes imports cleaner and easier to maintain
+Tests connect to the real database. `MONGODB_URI` must be set in `.env`.
+
+```bash
+npm test
+```
+
+The suite runs 22 tests covering:
+
+- Full card creation with all fields
+- Auto-generated and client-provided slugs
+- Private card creation and access code rules
+- Draft card non-retrieval
+- All error codes: SL02, AC01, AC05, NF01, NF02, AC03, AC04
+- Soft delete and post-delete retrieval
+- Response shape assertions on every success response
+- Slug suffix generation on collision and short titles
 
 ---
 
-**Good luck with your assessment!** 🚀
+## Deployment
 
-Remember: This guide shows you HOW to structure your code, not WHAT logic to implement. The problem-solving is up to you!
+The service is designed to deploy on Render.
+
+1. Push the repository to GitHub
+2. Create a new **Web Service** on [render.com](https://render.com)
+3. Connect the repository and set:
+   - **Build command:** `npm install`
+   - **Start command:** `node bootstrap.js`
+4. Add environment variables in the Render dashboard (same keys as `.env`)
+5. Under MongoDB Atlas **Network Access**, allow connections from `0.0.0.0/0`
+   so Render's dynamic IPs are not blocked
+6. Once deployed, the base URL is your submission URL
+
+The `Procfile` at the project root (`web: node bootstrap.js`) is also recognised
+by Heroku if you prefer that platform.
+
+---
+
+## Live URL
+
+https://your-render-url.onrender.com

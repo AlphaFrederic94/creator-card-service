@@ -11,6 +11,10 @@ const canLogEndpointInformation = process.env.CAN_LOG_ENDPOINT_INFORMATION;
 
 createConnection({
   uri: process.env.MONGODB_URI,
+}).then(() => {
+  console.log('mongodb connected');
+}).catch((err) => {
+  console.error('mongodb connection failed:', err.message);
 });
 
 createQueue();
@@ -90,3 +94,4 @@ ENDPOINT_CONFIGS.forEach((config) => {
 });
 
 server.startServer();
+console.log(`server started on port ${process.env.PORT || 8811}`);
